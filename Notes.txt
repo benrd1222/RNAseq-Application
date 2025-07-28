@@ -1,0 +1,60 @@
+What tool am I considering designing for RNAseq pipelines?
+
+
+There are plenty of tutorials on how to set the data up post quality control.
+
+
+What is generally more annoying is DESeq2's need to define the contrasts and managing the different contrasts when looking at the data as a whole.
+
+
+
+Personally for me what would be useful for future bulk sequencing analyses is to have a script that:
+
+In:
+- The post-QC data
+- The Metadata
+- Reference level (otherwise reference level will be implied by DESeq2)
+- The formula for the GLM
+- Padj method, default to BH
+
+- Cutoffs for padj and significant LFC
+    - allow for vectorization of this input
+-Number of top genes
+
+-reference library for species: drop down, if other allow string input to grab from bioconductor
+- BF, CC, or MF defaults to all three being produced
+
+Out: This output really will require a flowchart for felxibility depending on the formula input
+- A DESeq2 datastructure
+- Flexible PCA
+
+- Volcano Plot
+- Summaries of the top changed genes for chosen contrasts (geneID (given a species from drop down), LFC)
+
+-GSEA's of each treatment: either all BF, CC, MF.
+
+
+
+
+Could make this a Shiny App:
+- instead of a bunch of outputs being saved, make it a dynamic graphical output where they can change cutoffs and contrasts
+- And drop downs where they can choose what to export (which contrasts with which cutoffs)
+
+- The dynamic nature of an App would let me set up a venn diagram section where they could drop down which treatments they want to compare
+
+-Gene Ontology would also be a good dynamic visual
+    - Choose your treatment
+    - Choose your ontology database
+    - Number of groups
+    - GSEA for general
+    - ORA: triggers filtering of up or down regulated genes in selected treatment
+   * For this function it would be important to store GSEAs and ORAs already run in a tmp folder to reference if they want to see it again and
+visualize a different number of groups* Then write the data to their project folder when they click export
+
+# Start the design from the simplestformula possible
+
+Control vs Treatment:
+Y~X- this can be scaled by the levels of X
+
+Full Factorial:
+Y~X1+X2+X1*X2 - this harder to
