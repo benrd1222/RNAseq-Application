@@ -43,9 +43,6 @@ ui <- page_fluid(
                             "Please enter a formula valid for DESeq2", 
                             value = "~ condition"
                   ),
-                  # do I make them write the tilde or just imply it behind the scenes
-                  # TODO: more helpfully I could update the available variable names 
-                  #when they upload the metadata
                   input_switch("relevel_switch", "
                                Define reference levels"),
                   uiOutput("reveal_relevel"),
@@ -53,12 +50,11 @@ ui <- page_fluid(
                                "Apply Pre-filtering"),
                   uiOutput("reveal_pre_filter"),
                   input_switch("shrink_switch", 
-                               "Apply LFCshrinkage"),
-                  # TODO: this switch also needs to bring up a drop down of the
-                  # different coefficients that can be shrunk
+                               "Apply LFCshrinkage"), #TODO: think of how to apply this easily
                   tags$hr(),
                   actionButton("run_dds", 
-                               "Run Analysis")
+                               "Run Analysis"),
+                  uiOutput("analysis_error_message")
                 )
               ),
               
@@ -66,6 +62,12 @@ ui <- page_fluid(
                 card_header("Analysis Export"),
                 downloadButton("export_dds", 
                              "Download DESeq Datastructure")
+              ),
+              card(
+                card_header("Testing"),
+                actionButton("run_test",
+                             "Test"),
+                textOutput("testOutput")
               )
               ),
     
@@ -111,6 +113,27 @@ ui <- page_fluid(
 
 # Server ----
 server <- function(input, output) {
+  
+  # Testing Output -----------------------------------------------------
+  
+  test_output_data <- eventReactive(input$run_test, {
+    cat(file=stderr(),"Triggering the test evaluation...\n")
+    
+    counts <- rawData()
+    meta <- metaData()
+    f <- usrFormula()
+    req(counts,meta,f)
+    
+    cat(file=stderr(),"Made it through test eval...\n")
+    
+    list(colnames(counts),colnames(meta),f)
+  })
+  
+  output$testOutput <- renderPrint({
+    test_output_data() # Call the eventReactive to get its value
+  })
+  
+  
   # Conditional Switch inputs ----
   # Allowing user re-leveling
   output$reveal_relevel <- renderUI({
@@ -156,8 +179,8 @@ server <- function(input, output) {
     df <- tryCatch(
       {
         read.csv(input$data$datapath,
-                 header = input$header,
-                 sep = input$sep,
+                 header = TRUE,
+                 sep = ",",
                  stringsAsFactors = FALSE)
       },
       error = function(e) {
@@ -172,10 +195,10 @@ server <- function(input, output) {
     
     df <- tryCatch(
       {
-        read.csv(input$data$datapath,
-                 header = input$header,
-                 sep = input$sep,
-                 stringsAsFactors = TRUE)
+        read.csv(input$meta$datapath,
+                 header = TRUE,
+                 sep = ",",
+                 stringsAsFactors = FALSE)
       },
       error = function(e) {
         NULL
@@ -189,49 +212,70 @@ server <- function(input, output) {
     
     f <- tryCatch(
       {
-        formula(f)
+        formula(input$formula)
       },
       error = function(e){
+        message("Error creating formula: ", e$message)
         NULL
       }
     )
     return(f)
   })
-  # Initial Analysis Run ------------------------------------------------
-  analysisOutput <- eventReactive(input$run_dds, {
 
-    counts <- rawData()
-    meta <- metaData()
-    f <- usrFormula()
-    req(counts,meta,f)
+  
+  # Initial Analysis Run ------------------------------------------------
+  
+  dds_object <- reactiveVal(NULL) # dds reactive val
+  rv_analysis_messages <- reactiveVal("") # validation errors
+  
+  # TODO: switch from console based progress to UI based progress
+  # observeEvent causes this to crash when errored out
+  # I think I need to encolse the entire function in a tryCatch
+
+  observeEvent(input$run_dds, {
     
-    # TODO: design validation, check scratch.R for info on formula validation
-    validate(
-      need(
-        !is.null(counts) && nrow(counts) > 0,
-        "No data has been uploaded."
-      ),
-      need(
-        !is.null(meta) && nrow(meta) > 0,
-        "No metadata has been uploaded."
-      ),
-      need(
-        !is.null(f),
-        "Invalid formula provided."
-      ),
-      need(
-        "The first columns of the data to be a specfic name and be of type character"
-           ),
-      need(
-        "colnames to match the first column of the metadata"
-      ),
-      need(
-        "check that meta[,1]==colnames(counts[,-c(1,2)])"
-      ),
-      need(
-        "columns in metadata to conform with the pieces of valid formula"
-      )
-    )
+    cat(file=stderr(),"Starting analysis...\n")
+    
+    tryCatch({
+      counts <- rawData()
+      meta <- metaData()
+      f <- usrFormula()
+      req(counts,meta,f)
+      
+      cat(file=stderr(),"Meet the requirements...")
+      
+      # force the first two columnns to chr and ensure there are no duplicate row identifier
+      counts[,1:2]<-as.character(counts[,1:2])
+      #TODO: rownames need to be unique, implement method of ensuring uniqueness
+      
+      # TODO: design validation, check scratch.R for info on formula validation
+      # make it so the messages from validate are displayed to the user under the activation button!
+      # we are silently failing at validation right now
+      validate(
+        need(!is.null(counts) && nrow(counts) > 0,
+             "No data has been uploaded."),
+        need(!is.null(meta) && nrow(meta) > 0,
+             "No metadata has been uploaded."),
+        need(!is.null(f),
+             "Invalid formula provided."),
+        need(ncol(counts) >= 2 && 
+               colnames(counts)[1]=="gene.id" && 
+               colnames(counts)[2]=="gene.name",
+             "The first two columns must be vectors of characters named gene.id and gene.name respectively"),
+        need(length(colnames(counts[,-c(1,2)])) > 0 &&
+               length(meta[,1]) > 0 &&
+               all(sort(colnames(counts[,-c(1,2)])) == sort(as.character(meta[,1]))),
+             "Sample names in count data columns and 
+             metadata do not match exactly when sorted. Please check for discrepancies."),
+        # need(,
+        #   "columns in metadata to conform with the pieces of valid formula")
+      )},error = function(e){
+        cat(file=stderr(), "Error caught in analysis: ", e$message, "\n")
+        rv_analysis_messages(e$message) # Store the error message in the reactiveVal
+        NULL # Return NULL for the reactive context (or stop for observers)
+    })
+    
+    cat(file=stderr(),"Passed Validation!")
     
     # Validation should have us proceeding with the following datastructures
     # counts <-
@@ -241,46 +285,54 @@ server <- function(input, output) {
     # meta <- 
     # Sample_names | Treatment1 | ... | TreatmentN
     # <factor>     | <factor>   | ... | <factor>
-
+    
     # f <- valid formula
     
-    # TODO: something is broken with the progress run, or my validation is not
-    # informative enough. I would guess it is an issue with how I am passing my 
-    # forumula and the reactive check. I believ we are failing on line 205 calling
-    # to the function on line 187
+    # body of initial analysis
+    genes<-cbind(counts[,1],counts[,2])
     
-    withProgress(meassage = "Running DESeq2 Analysis", value=0,{
-      # body of initial analysis
-      genes<-cbind(counts[,1],counts[,2])
-
-      row.names(counts)<-counts[,1]
-      counts<-counts[,-c(1,2)]
-      
-      row.names(meta)<-meta[,1]
-      meta<-meta[,-1]
-      
-      if(input$relevel_switch){
-        #Do some re leveling based off of the dynamic re leveling solution
-      }
-      
-      dds <- DESeqDataSetFromMatrix(countData=counts, colData=meta, design=f)
-      
-      if(input$pre_filter_switch){
-        smallestGroupSize <- input$smallestGroup
-        smallestCounts <- input$smallestCount
-        dds <- dds[rowSums(counts(dds) >= smallestCount) >= smallestGroupSize, ]
-      }
-      
-      if(input$shrink_switch){
-        # DOES NOTHING FOR NOW
-        #lfcShrink(dds, coef="fix needed", type="apeglm")
-      }
-
-      dds <- DESeq(dds)
-    })
+    row.names(counts)<-counts[,1]
+    counts<-counts[,-c(1,2)]
     
-    dds
+    row.names(meta)<-meta[,1]
+    meta<-meta[,-1]
+    
+    if(input$relevel_switch){
+      #Do some re leveling based off of the dynamic re leveling solution
+    }
+    
+
+    dds <- DESeqDataSetFromMatrix(countData=counts, colData=meta, design=f)
+    
+    cat(file=stderr(),"Made our matrix...")
+    
+    if(input$pre_filter_switch){
+      smallestGroupSize <- input$smallestGroup
+      smallestCounts <- input$smallestCount
+      dds <- dds[rowSums(counts(dds) >= smallestCount) >= smallestGroupSize, ]
+    }
+    
+    if(input$shrink_switch){
+      # DOES NOTHING FOR NOW
+      #lfcShrink(dds, coef="fix needed", type="apeglm")
+    }
+    
+    cat(file=stderr(),"Running differential expression GLM...")
+    dds <- DESeq(dds)
+
+    r_dds_object(dds)
+    cat(file=stderr(),"Stored out data... try out the downloader")
+    #return(dds)
   }) # end analysisOutput
+  
+  output$analysis_error_message <- renderUI({
+    message_text <- rv_analysis_messages()
+    if (nzchar(message_text)) {
+      div(class = "alert alert-danger", HTML(message_text))
+    } else {
+      NULL
+    }
+  })
   
   # Clear analysis output if file changes after an analysis was run ----
   observeEvent(c(input$data,input$meta,input$formula), {
@@ -288,16 +340,19 @@ server <- function(input, output) {
   }, ignoreInit = TRUE)
 
   # dds download handler -----
+  # need to call the event analysisOutput()
   output$export_dds <- downloadHandler(
     filename = function() {
       paste0("DESeq_app_dds_", Sys.Date(), ".rds")
     },
     content = function(file) {
-      req(analysisOutput) # this statement may need to point to reactive funciton
+      dds_to_download <- r_dds_object()
       
-      saveRDS(analysisOuput, file = file)
+      req(dds_to_download) # this statement may need to point to reactive funciton
+      
+      saveRDS(dds_to_download, file = file)
     }
-  ) #TODO: check that this works properly with small example dataset
+  )
   
   
 }
