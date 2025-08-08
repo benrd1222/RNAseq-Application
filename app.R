@@ -1,10 +1,16 @@
 library(shiny)
 library(bslib)
 library(DESeq2)
+library(stringr)
 
 # This needs to be carefully considered if you want to host this app online,
 # but for local use it is dependent on your computers available memory
 options(shiny.maxRequestSize = 4000 * 1024^2) #set to 4 gigabytes
+
+# should consider reading about bindEvent to pair with bindCache
+
+# Another Consideration:
+# bind the error catches to clearing of cached environment variables
 
 # NEXT STEPS:
 # Address the various TODOs and get a version 0.0.1 working
@@ -41,7 +47,7 @@ ui <- page_fluid(
                   card_header("Analysis"),
                   textInput("formula", 
                             "Please enter a formula valid for DESeq2", 
-                            value = "~ condition"
+                            value = "~ treatment"
                   ),
                   input_switch("relevel_switch", "
                                Define reference levels"),
@@ -50,7 +56,7 @@ ui <- page_fluid(
                                "Apply Pre-filtering"),
                   uiOutput("reveal_pre_filter"),
                   input_switch("shrink_switch", 
-                               "Apply LFCshrinkage"), #TODO: think of how to apply this easily
+                               "Apply LFCshrinkage"), #TODO: MED think of how to apply this easily
                   tags$hr(),
                   actionButton("run_dds", 
                                "Run Analysis"),
@@ -117,16 +123,58 @@ server <- function(input, output) {
   # Testing Output -----------------------------------------------------
   
   test_output_data <- eventReactive(input$run_test, {
-    cat(file=stderr(),"Triggering the test evaluation...\n")
+    cat(file=stderr(),"Triggering test evaluation...\n")
     
-    counts <- rawData()
-    meta <- metaData()
-    f <- usrFormula()
-    req(counts,meta,f)
+    tryCatch({
+      counts <- rawData()
+      meta <- metaData()
+      if(length(input$formula)>0){f_usr <- input$formula}
+      
+      req(counts,meta,f_usr)
+      
+      #need to include how to deal with -1 and ~.
+      
+      f<-gsub(" ","",f_usr)
+      if(grepl("~",f)){f<-str_extract(f,"(?<=~).*")} 
+      # if the usr made a formula with a twiddle, just take everything after the twiddle
+      
+      f_fac<-unlist(str_split(f,"[+,*,:,|,-]"))
+      # these are the pieces we need to match against the meta colnames()
+      f_fac<-f_fac[f_fac!=1] 
+      #-1 is a common indicator to exclude the intercept in formulas which we don't need to check against the metadata
+      
+      
+      validate(
+        need(ncol(counts) >= 2 && 
+               colnames(counts)[1]=="gene.id" && 
+               colnames(counts)[2]=="gene.name",
+             "The first two columns must be vectors of characters named gene.id and gene.name respectively"),
+        need(length(colnames(counts[,-c(1,2)])) > 0 &&
+               length(meta[,1]) > 0 &&
+               all(sort(colnames(counts[,-c(1,2)])) == sort(as.character(meta[,1]))),
+             "Sample names in count data columns and 
+             metadata do not match exactly when sorted. Please check for discrepancies."),
+        if(f!="~."){need(all(f_fac %in% colnames(meta)),
+                         "the pieces of your formula need to exactly match the columnnames of the metadata provided")}
+      )},error = function(e){
+        cat(file=stderr(), "Error caught in analysis: ", e$message, "\n")
+        validation_errors(e$message) # Store the error message in the reactiveVal
+        NULL # Return NULL for the reactive context (or stop for observers)
+      })
     
-    cat(file=stderr(),"Made it through test eval...\n")
+    cat("Passed Validation!\n")
     
-    list(colnames(counts),colnames(meta),f)
+    row.names(counts)<-counts[,1]
+    
+    counts<-counts[,-c(1,2)]
+    
+    row.names(meta)<-meta[,1]
+    meta<-meta[,-1,drop=FALSE]
+    
+    f<-paste0("~",f)
+    f<-formula(f)
+    
+    list(head(counts),head(meta),f)
   })
   
   output$testOutput <- renderPrint({
@@ -135,19 +183,20 @@ server <- function(input, output) {
   
   
   # Conditional Switch inputs ----
-  # Allowing user re-leveling
+  
+  # Allowing user re-leveling: observing input$relevel_switch
   output$reveal_relevel <- renderUI({
     meta<-metaData()
     if (input$relevel_switch && !is.null(meta)) {
       textInput("Placeholder","Placeholder") 
-      # TODO: Dynamic UI element, based on the amount of treatment variables
+      # TODO: MED Dynamic UI element, based on the amount of treatment variables
       # listed in the metadata allows for the selection of reference level for each
     } else {
       NULL
     }
   })
   
-  # Allowing user pre-filtering preferences 
+  # Allowing user pre-filtering preferences: observing input input$pre_filter_switch
   output$reveal_pre_filter <- renderUI({
     if(input$pre_filter_switch){
       tagList(
@@ -172,16 +221,16 @@ server <- function(input, output) {
     }
   })
   # Data Input ------------------------------------------------
-  # Reactive observation of the data or metadata:
+  
+  # Functions that look at the current inputs given by the user but are called by
+  # the analysis function
   rawData <- reactive({
     req(input$data) # Requires that a file has been uploaded
     
     df <- tryCatch(
       {
         read.csv(input$data$datapath,
-                 header = TRUE,
-                 sep = ",",
-                 stringsAsFactors = FALSE)
+                 header = TRUE)
       },
       error = function(e) {
         NULL
@@ -197,8 +246,7 @@ server <- function(input, output) {
       {
         read.csv(input$meta$datapath,
                  header = TRUE,
-                 sep = ",",
-                 stringsAsFactors = FALSE)
+                 stringsAsFactors = TRUE)
       },
       error = function(e) {
         NULL
@@ -207,31 +255,25 @@ server <- function(input, output) {
     return(df)
   })
   
-  usrFormula <- reactive({
-    req(input$formula)
-    
-    f <- tryCatch(
-      {
-        formula(input$formula)
-      },
-      error = function(e){
-        message("Error creating formula: ", e$message)
-        NULL
-      }
-    )
-    return(f)
-  })
-
-  
   # Initial Analysis Run ------------------------------------------------
   
-  dds_object <- reactiveVal(NULL) # dds reactive val
-  rv_analysis_messages <- reactiveVal("") # validation errors
+  dds_object <- reactiveVal(NULL)
+  validation_errors <- reactiveVal("")
   
-  # TODO: switch from console based progress to UI based progress
+  # Clear error messages: observing the key inputs related to user provided data
+  observeEvent(c(input$data,input$meta,input$formula),{
+    validation_errors("")
+  })
+  
+  # TODO: LOW- switch from console based progress to UI based progress
   # observeEvent causes this to crash when errored out
   # I think I need to encolse the entire function in a tryCatch
-
+  
+  # TODO: HIGH- have a general tryCatch around the different DESeq functions
+  # capture error messages and display to user in APP without crashing the 
+  
+  # Reads in the data, validates, and runs the initial DESeq Analysis:
+  # observing input$run_dds
   observeEvent(input$run_dds, {
     
     cat(file=stderr(),"Starting analysis...\n")
@@ -239,25 +281,27 @@ server <- function(input, output) {
     tryCatch({
       counts <- rawData()
       meta <- metaData()
-      f <- usrFormula()
-      req(counts,meta,f)
+      if(length(input$formula)>0){f_usr <- input$formula}
       
-      cat(file=stderr(),"Meet the requirements...")
+      req(counts,meta,f_usr)
       
-      # force the first two columnns to chr and ensure there are no duplicate row identifier
-      counts[,1:2]<-as.character(counts[,1:2])
-      #TODO: rownames need to be unique, implement method of ensuring uniqueness
+      cat(file=stderr(),"Data read in...\n")
       
-      # TODO: design validation, check scratch.R for info on formula validation
-      # make it so the messages from validate are displayed to the user under the activation button!
-      # we are silently failing at validation right now
+      # TODO: HIGH design validation=
+      
+      #need to include how to deal with -1 and ~.
+      
+      f<-gsub(" ","",f_usr)
+      if(grepl("~",f)){f<-str_extract(f,"(?<=~).*")} 
+      # if the usr made a formula with a twiddle, just take everything after the twiddle
+      
+      f_fac<-unlist(str_split(f,"[+,*,:,|,-]"))
+      # these are the pieces we need to match against the meta colnames()
+      f_fac<-f_fac[f_fac!=1] 
+      #-1 is a common indicator to exclude the intercept in formulas which we don't need to check against the metadata
+      
+      
       validate(
-        need(!is.null(counts) && nrow(counts) > 0,
-             "No data has been uploaded."),
-        need(!is.null(meta) && nrow(meta) > 0,
-             "No metadata has been uploaded."),
-        need(!is.null(f),
-             "Invalid formula provided."),
         need(ncol(counts) >= 2 && 
                colnames(counts)[1]=="gene.id" && 
                colnames(counts)[2]=="gene.name",
@@ -267,16 +311,17 @@ server <- function(input, output) {
                all(sort(colnames(counts[,-c(1,2)])) == sort(as.character(meta[,1]))),
              "Sample names in count data columns and 
              metadata do not match exactly when sorted. Please check for discrepancies."),
-        # need(,
-        #   "columns in metadata to conform with the pieces of valid formula")
+        if(f!="~."){need(all(f_fac %in% colnames(meta)),
+                         "the pieces of your formula need to exactly match the column names of the metadata provided")}
       )},error = function(e){
         cat(file=stderr(), "Error caught in analysis: ", e$message, "\n")
-        rv_analysis_messages(e$message) # Store the error message in the reactiveVal
+        validation_errors(e$message) # Store the error message in the reactiveVal
         NULL # Return NULL for the reactive context (or stop for observers)
     })
     
-    cat(file=stderr(),"Passed Validation!")
+    cat("Passed Validation!\n")
     
+    # Post validation data description:
     # Validation should have us proceeding with the following datastructures
     # counts <-
     # Gene_id | External_gene_name | Sample1_name | ... | SampleN_name
@@ -286,25 +331,33 @@ server <- function(input, output) {
     # Sample_names | Treatment1 | ... | TreatmentN
     # <factor>     | <factor>   | ... | <factor>
     
-    # f <- valid formula
+    # f <- valid pieces to a formula
     
     # body of initial analysis
     genes<-cbind(counts[,1],counts[,2])
     
     row.names(counts)<-counts[,1]
+    
     counts<-counts[,-c(1,2)]
     
     row.names(meta)<-meta[,1]
-    meta<-meta[,-1]
+    meta<-meta[,-1,drop=FALSE]
+    
+    f<-paste0("~",f)
+    f<-formula(f)
     
     if(input$relevel_switch){
       #Do some re leveling based off of the dynamic re leveling solution
     }
     
-
+    # cat(paste("Moving on to forming DESeq Matrix with count data of dimension\n
+    #           Rows:",nrow(counts)," Columns:", ncol(counts),"\n",
+    #           "Meta Columns of names:",base::colnames(meta),"\n"))
+    # 
+    
     dds <- DESeqDataSetFromMatrix(countData=counts, colData=meta, design=f)
     
-    cat(file=stderr(),"Made our matrix...")
+    cat(file=stderr(),"Made our matrix...\n")
     
     if(input$pre_filter_switch){
       smallestGroupSize <- input$smallestGroup
@@ -317,16 +370,17 @@ server <- function(input, output) {
       #lfcShrink(dds, coef="fix needed", type="apeglm")
     }
     
-    cat(file=stderr(),"Running differential expression GLM...")
+    cat(file=stderr(),"Running differential expression GLM...\n")
     dds <- DESeq(dds)
 
-    r_dds_object(dds)
-    cat(file=stderr(),"Stored out data... try out the downloader")
+    dds_object(dds)
+    cat("Initial analysis complete... try out the downloader\n")
     #return(dds)
   }) # end analysisOutput
   
+  # Output to generate scary UI error message
   output$analysis_error_message <- renderUI({
-    message_text <- rv_analysis_messages()
+    message_text <- validation_errors()
     if (nzchar(message_text)) {
       div(class = "alert alert-danger", HTML(message_text))
     } else {
@@ -334,25 +388,49 @@ server <- function(input, output) {
     }
   })
   
-  # Clear analysis output if file changes after an analysis was run ----
-  observeEvent(c(input$data,input$meta,input$formula), {
-    output$analysisOutput <- renderPrint("")
-  }, ignoreInit = TRUE)
 
-  # dds download handler -----
-  # need to call the event analysisOutput()
+  # TODO: LOW make sure this is implemented corectly, quickly adapted this to the 
+  # new observeEvent format. OR consider implementing a clear analysis button
+  #
+  # # the easiest way to test this is move on and make functionality, have another
+  # # dataset and then test if I change inputs if the functionality stops because the
+  # # it thinks the analysis is about to be updated. This could just end up being an
+  # # annoying feature
+  # 
+  # # Clear analysis output if file changes after an analysis was run: observing key changed inputs to indicate a new analysis is being run
+  # observeEvent(c(input$data,input$meta,input$formula), {
+  #   dds_object(NULL)
+  # }, ignoreInit = TRUE)
+
+  # DESeq Dataset download handler -----
+
+  # Output processed into an .rds to be passed to the download handler
   output$export_dds <- downloadHandler(
     filename = function() {
       paste0("DESeq_app_dds_", Sys.Date(), ".rds")
     },
     content = function(file) {
-      dds_to_download <- r_dds_object()
+      dds_to_download <- dds_object()
       
-      req(dds_to_download) # this statement may need to point to reactive funciton
+      req(dds_to_download)
       
       saveRDS(dds_to_download, file = file)
     }
   )
+  
+  
+  
+  # Post Analysis Functionality ----
+  
+  # we now have a working application to run a basic analysis,
+  
+  # TODO: AFTER BASIC FUNCTIONALITY TODOS add in tab to load in a previous analysis, circumventing the main page
+  # will also be useful for testing to just load up an .rds
+  
+  # All other features actually using the post-processing data here
+  
+  # PCA and initial volcano plots.
+  # This working properly depends on setting the reference level set properly
   
   
 }
