@@ -16,6 +16,14 @@ options(shiny.maxRequestSize = 4000 * 1024^2) #set to 4 gigabytes
 # NEXT STEPS:
 # once all the switches are working move onto loading analyses from rds
 
+# TODO: MED- replace the horrible cat errors and conditional UI error
+# with the showNotification, just found out this is an option, and it is exactly
+# the option I was looking for
+
+# showNotification(
+#   "Error: The uploaded file is not a valid 'DESeqDataSet' object.",
+#   type = "error"
+# )
 
 # TODO: LOW- set it up so the cards are different widths for Set Up and Analysis
 # make the SetUp 1/3 of the page and analysis taking up the rest
@@ -113,17 +121,36 @@ ui <- page_fluid(
               ),
     # Extras ----
     nav_menu( 
-      "Other links", 
+      "Other links",
+      
+      nav_panel("Load previous analysis from .rds", 
+                card(
+                  card_header("Load previous analysis"),
+                  
+                  fileInput("prev_model",
+                             "Select a valid .rds where you saved a previous DESeq output",
+                             accept = ".rds"
+                  ),
+                  
+                  actionButton("load_prev_model",
+                               "Load Previous Model"
+                  )
+                     )
+      ),
+      
       nav_panel("Venn Diagrams *Beta*", 
                 "May break"
-                ), 
+                ),
+      
       "----",
+      
       "Help",
       nav_item( 
         a("DESeq2 Tutorial", 
           href = "https://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html",
           target = "_blank") 
       ),
+      
       nav_item( 
         a("Valid Formulas", 
           href = "https://www.datacamp.com/tutorial/r-formula-tutorial",
@@ -368,7 +395,8 @@ server <- function(input, output) {
              metadata do not match exactly when sorted. Please check for discrepancies."),
         if(f!="~."){need(all(f_fac %in% colnames(meta)),
                          "the pieces of your formula need to exactly match the column names of the metadata provided")}
-      )},error = function(e){
+      )
+      },error = function(e){
         cat(file=stderr(), "Error caught in analysis: ", e$message, "\n")
         validation_errors(e$message)
         NULL
@@ -478,6 +506,36 @@ server <- function(input, output) {
   )
   
   
+  
+  
+  # Load Previous Model ----
+  # Looks for trigger from "load_prev_model"
+  # requires a model has been uploaded, readRDS(), validate then
+  # store in dds_object(dds), to overwrite any analysis currently being stored
+  
+  observeEvent(input$load_prev_model,{
+    req(input$prev_model)
+    
+    tmp <- tryCatch({
+      readRDS(input$prev_model$datapath)
+    }, error = function(e){NULL}
+      )
+    
+    if(is.null(tmp) || class(tmp)!="DESeqDataSet"){
+      showNotification(
+        "Error: The uploaded file is not a valid 'DESeqDataSet' object.",
+        type = "error"
+      )
+      return()
+    }
+    
+    dds_object(tmp)
+      
+    cat("Analysis uploaded successfully with results loaded in as ", 
+        resultsNames(dds_object(),
+        "\n If this looks incorrect please validate the model was downloaded correctly\n"))
+      
+  })
   
   # Post Analysis Functionality ----
   
