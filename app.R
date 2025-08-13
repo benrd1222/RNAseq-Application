@@ -7,13 +7,20 @@ library(stringr)
 # but for local use it is dependent on your computers available memory
 options(shiny.maxRequestSize = 4000 * 1024^2) #set to 4 gigabytes
 
-# should consider reading about bindEvent to pair with bindCache
+# should consider reading about bindEvent to pair with bindCache could probably
+# make this run better.
 
 # Another Consideration:
 # bind the error catches to clearing of cached environment variables
 
 # NEXT STEPS:
-# Address the various TODOs and get a version 0.0.1 working
+# once all the switches are working move onto loading analyses from rds
+
+
+# TODO: LOW- set it up so the cards are different widths for Set Up and Analysis
+# make the SetUp 1/3 of the page and analysis taking up the rest
+# could also look to get the dynamic listing of covariates to choose reference levels
+# for renders them all side by side rather than vertically
 
 # UI ----
 ui <- page_fluid(
@@ -31,6 +38,7 @@ ui <- page_fluid(
                                        "text/comma-separated-values,text/plain",
                                        ".csv")
                   ), # may want to support other file types
+                  
                   fileInput("meta",
                             "Select the CSV file of the meta data for this analysis",
                             accept = c("text/csv",
@@ -43,21 +51,30 @@ ui <- page_fluid(
                 of one column labeled condition that notes the treatment of each 
                 sample as control vs. experimental"
                 ),
+                
                 card(
                   card_header("Analysis"),
+                  
                   textInput("formula", 
                             "Please enter a formula valid for DESeq2", 
                             value = "~ treatment"
                   ),
+                  
                   input_switch("relevel_switch", "
-                               Define reference levels"),
-                  uiOutput("reveal_relevel"),
+                               Define reference levels"), #switch to trigger multiselect option
+                  uiOutput("reveal_relevel"), # multiselect option and commit button
+                  uiOutput("reveal_relevel_choice"), # commit triggers final input lines
+                  
                   input_switch("pre_filter_switch", 
-                               "Apply Pre-filtering"),
+                               "Apply Pre-filtering",
+                               value = TRUE),
                   uiOutput("reveal_pre_filter"),
+                  
                   input_switch("shrink_switch", 
                                "Apply LFCshrinkage"), #TODO: MED think of how to apply this easily
+                  
                   tags$hr(),
+                  
                   actionButton("run_dds", 
                                "Run Analysis"),
                   uiOutput("analysis_error_message")
@@ -185,15 +202,55 @@ server <- function(input, output) {
   # Conditional Switch inputs ----
   
   # Allowing user re-leveling: observing input$relevel_switch
+  # Actually there are just conditional panels, so I don't need this and shoul recode the other reveal switch
   output$reveal_relevel <- renderUI({
     meta<-metaData()
     if (input$relevel_switch && !is.null(meta)) {
-      textInput("Placeholder","Placeholder") 
-      # TODO: MED Dynamic UI element, based on the amount of treatment variables
-      # listed in the metadata allows for the selection of reference level for each
-    } else {
-      NULL
-    }
+      tagList(
+        selectInput(
+          "col_relevel",
+          "Select Covariate(s) to relevel:",
+          choices = names(meta)[-1],
+          multiple = TRUE,
+          selected = names(df)[1]
+        ),
+        actionButton(
+          "go_relevel",
+          "Select"
+        )
+      )
+    }else{NULL}
+  })
+  
+  output$reveal_relevel_choice <- renderUI({
+    meta<-metaData()
+    
+    req(meta, input$col_relevel)
+    
+    
+    if(input$go_relevel && length(input$col_relevel) > 0){
+      
+      cov_to_re<-input$col_relevel
+      
+      elements<-list()
+      #need to make a number of elements equal to the number of variables in meta
+      for(i in 1:length(cov_to_re)){
+        
+        name<-cov_to_re[i]
+        
+        current_choices <- unique(meta[[name]])
+        
+        elements[[i]]<-selectInput(
+          paste0("relevel_",name),
+          paste0("Select reference condition for ",name,":"),
+          choices = current_choices,
+          selected = current_choices[1]
+        )
+      }
+      
+      tagList(elements)
+      
+    }else{NULL}
   })
   
   # Allowing user pre-filtering preferences: observing input input$pre_filter_switch
@@ -216,10 +273,15 @@ server <- function(input, output) {
         )
       )
     }
-    else{
-      NULL
-    }
+    else{NULL}
   })
+  
+  
+  # Finally the last conditional switch is to do with applying LFC shrinkage
+  # which will be a bonus feature to deal with at the very end
+  # because if somebody is asking to apply that they probably know how to code
+  # if they are reading that deep into the DESeq vignette
+  
   # Data Input ------------------------------------------------
   
   # Functions that look at the current inputs given by the user but are called by
@@ -232,9 +294,7 @@ server <- function(input, output) {
         read.csv(input$data$datapath,
                  header = TRUE)
       },
-      error = function(e) {
-        NULL
-      }
+      error = function(e){NULL}
     )
     return(df)
   })
@@ -248,9 +308,7 @@ server <- function(input, output) {
                  header = TRUE,
                  stringsAsFactors = TRUE)
       },
-      error = function(e) {
-        NULL
-      }
+      error = function(e){NULL}
     )
     return(df)
   })
@@ -269,7 +327,7 @@ server <- function(input, output) {
   # observeEvent causes this to crash when errored out
   # I think I need to encolse the entire function in a tryCatch
   
-  # TODO: HIGH- have a general tryCatch around the different DESeq functions
+  # TODO: LOW- have a general tryCatch around the different DESeq functions
   # capture error messages and display to user in APP without crashing the 
   
   # Reads in the data, validates, and runs the initial DESeq Analysis:
@@ -287,10 +345,7 @@ server <- function(input, output) {
       
       cat(file=stderr(),"Data read in...\n")
       
-      # TODO: HIGH design validation=
-      
-      #need to include how to deal with -1 and ~.
-      
+      # pre-validation specific to formula inputs
       f<-gsub(" ","",f_usr)
       if(grepl("~",f)){f<-str_extract(f,"(?<=~).*")} 
       # if the usr made a formula with a twiddle, just take everything after the twiddle
@@ -300,7 +355,7 @@ server <- function(input, output) {
       f_fac<-f_fac[f_fac!=1] 
       #-1 is a common indicator to exclude the intercept in formulas which we don't need to check against the metadata
       
-      
+      # validation
       validate(
         need(ncol(counts) >= 2 && 
                colnames(counts)[1]=="gene.id" && 
@@ -315,8 +370,8 @@ server <- function(input, output) {
                          "the pieces of your formula need to exactly match the column names of the metadata provided")}
       )},error = function(e){
         cat(file=stderr(), "Error caught in analysis: ", e$message, "\n")
-        validation_errors(e$message) # Store the error message in the reactiveVal
-        NULL # Return NULL for the reactive context (or stop for observers)
+        validation_errors(e$message)
+        NULL
     })
     
     cat("Passed Validation!\n")
@@ -333,7 +388,6 @@ server <- function(input, output) {
     
     # f <- valid pieces to a formula
     
-    # body of initial analysis
     genes<-cbind(counts[,1],counts[,2])
     
     row.names(counts)<-counts[,1]
@@ -347,22 +401,29 @@ server <- function(input, output) {
     f<-formula(f)
     
     if(input$relevel_switch){
-      #Do some re leveling based off of the dynamic re leveling solution
+      # here is where releveling the selected columns actually happens
+      # IN: User desired columns to relevel, and reference levels
+      # input$col_relevel and input$relevel_`input$col_relevel[i]`
+      
+      relevel_names<-input$col_relevel
+      
+      for(i in relevel_names){
+        meta[[i]]<-relevel(meta[[i]],ref=input[[paste0("relevel_",i)]]) #should work if input can be indexed like a dataframe
+      }
+      
+      cat("The user requested releveling of the following columns: ", relevel_names,"\n")
+      for(i in 1:length(relevel_names)){
+        cat("The reference level of ", relevel_names[i], " is: ", levels(meta[[relevel_names]])[i],"\n")
+        }
     }
     
-    # cat(paste("Moving on to forming DESeq Matrix with count data of dimension\n
-    #           Rows:",nrow(counts)," Columns:", ncol(counts),"\n",
-    #           "Meta Columns of names:",base::colnames(meta),"\n"))
-    # 
-    
+
     dds <- DESeqDataSetFromMatrix(countData=counts, colData=meta, design=f)
     
     cat(file=stderr(),"Made our matrix...\n")
     
     if(input$pre_filter_switch){
-      smallestGroupSize <- input$smallestGroup
-      smallestCounts <- input$smallestCount
-      dds <- dds[rowSums(counts(dds) >= smallestCount) >= smallestGroupSize, ]
+      dds <- dds[rowSums(counts(dds) >= input$smallestCount) >= input$smallestGroup, ]
     }
     
     if(input$shrink_switch){
@@ -383,9 +444,7 @@ server <- function(input, output) {
     message_text <- validation_errors()
     if (nzchar(message_text)) {
       div(class = "alert alert-danger", HTML(message_text))
-    } else {
-      NULL
-    }
+    } else{NULL}
   })
   
 
