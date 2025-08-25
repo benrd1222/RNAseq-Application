@@ -271,19 +271,10 @@ server <- function(input, output) {
   
   # Initial Analysis Run ------------------------------------------------
   
+  # variables we need to hang on to for exploratory analysis
   dds_object <- reactiveVal(NULL)
-  
-  # TODO: LOW- switch from console based progress to UI based progress
-  # observeEvent causes this to crash when errored out
-  # I think I need to enclose the entire function in a tryCatch
-  #
-  # Can probably use showNotification for a success banner as well
-  
-  
-  
-  # TODO: HIGH- clairfy app environment and if the variables within this observeEvent persist
-  # My intuition is that they do not like any other R function observeEvent creates
-  # an environment on run. So we need reactiveVals for meta and gene for future use
+  meta <- reactiveVal(NULL)
+  genes <- reactiveVal(NULL)
   
   observeEvent(input$run_dds, {
     
@@ -381,28 +372,43 @@ server <- function(input, output) {
         }
     }
     
+    # An okay application of withProgress at least lets the user see some form of
+    # progress in the browser
+    withProgress(message = 'Calculation in progress',
+                 detail = 'This may take a minute', value = 0, min = 0, max = 100, {
+                   
+                   
+                   dds <- DESeqDataSetFromMatrix(countData=counts, colData=meta, design=f)
+                   
+                   setProgress(value= 10,message="Made DESeq matrix...")
+                   cat(file=stderr(),"Made our matrix...\n")
+                   
+                   if(input$pre_filter_switch){
+                     dds <- dds[rowSums(counts(dds) >= input$smallestCount) >= input$smallestGroup, ]
+                   }
+                   
+                   if(input$shrink_switch){
+                     # DOES NOTHING FOR NOW
+                     #lfcShrink(dds, coef="fix needed", type="apeglm")
+                   }
+                   setProgress(value= 30,message="Running DESeq() analysis...")
+                   cat(file=stderr(),"Running differential expression GLM...\n")
+                   dds <- DESeq(dds)
+                   
+                   
+                   setProgress(value= 90,message="Finished DESeq computation")
+                   
+                   dds_object(dds)
+                   cat("Initial analysis complete... try out the downloader\n")
+                   #return(dds)
+                 })
     
-    dds <- DESeqDataSetFromMatrix(countData=counts, colData=meta, design=f)
+    showNotification("DESeq() has been run, try out the downloader to save your analysis", 
+                     duration = 8, 
+                     type = "message")
     
-    cat(file=stderr(),"Made our matrix...\n")
     
-    if(input$pre_filter_switch){
-      dds <- dds[rowSums(counts(dds) >= input$smallestCount) >= input$smallestGroup, ]
-    }
-    
-    if(input$shrink_switch){
-      # DOES NOTHING FOR NOW
-      #lfcShrink(dds, coef="fix needed", type="apeglm")
-    }
-    
-    cat(file=stderr(),"Running differential expression GLM...\n")
-    dds <- DESeq(dds)
-
-    dds_object(dds)
-    cat("Initial analysis complete... try out the downloader\n")
-    #return(dds)
   }) # end analysisOutput
-  
   
 
   # TODO: VERY LOW- consider the benefits of clearing analyses when changing data
@@ -414,6 +420,9 @@ server <- function(input, output) {
 
   # DESeq Dataset download handler -----
 
+  # The best way to solve the future issue, is to maybe have the app export the
+  # entire R environment, then when you reload it it just resets the app to a
+  # saved state
   # Output processed into an .rds to be passed to the download handler
   output$export_dds <- downloadHandler(
     filename = function() {
