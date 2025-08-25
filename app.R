@@ -10,15 +10,6 @@ library(stringr)
 # but for local use it is dependent on your computers available memory
 options(shiny.maxRequestSize = 4000 * 1024^2) #set to 4 gigabytes
 
-# should consider reading about bindEvent to pair with bindCache could probably
-# make this run better.
-
-# Another Consideration:
-# bind the error catches to clearing of cached environment variables
-
-# NEXT STEPS:
-# once all the switches are working move onto loading analyses from rds
-
 # TODO: MED- replace the horrible cat errors and conditional UI error
 # with the showNotification, just found out this is an option, and it is exactly
 # the option I was looking for
@@ -27,6 +18,9 @@ options(shiny.maxRequestSize = 4000 * 1024^2) #set to 4 gigabytes
 #   "Error: The uploaded file is not a valid 'DESeqDataSet' object.",
 #   type = "error"
 # )
+#
+# The premise here is to have a tryCatch around the code of interest, then catch
+# errors and return NULL. Have an if(NULL){} check that leads to the showNotification
 
 # TODO: LOW- set it up so the cards are different widths for Set Up and Analysis
 # make the SetUp 1/3 of the page and analysis taking up the rest
@@ -244,15 +238,12 @@ server <- function(input, output) {
   
   # Finally the last conditional switch is to do with applying LFC shrinkage
   # which will be a bonus feature to deal with at the very end
-  # because if somebody is asking to apply that they probably know how to code
-  # if they are reading that deep into the DESeq vignette
   
   # Data Input ------------------------------------------------
   
-  # Functions that look at the current inputs given by the user but are called by
-  # the analysis function
+  # Reactive read in of the selected user files
   rawData <- reactive({
-    req(input$data) # Requires that a file has been uploaded
+    req(input$data)
     
     df <- tryCatch(
       {
@@ -265,7 +256,7 @@ server <- function(input, output) {
   })
   
   metaData <- reactive({
-    req(input$meta) # Requires that a file has been uploaded
+    req(input$meta)
     
     df <- tryCatch(
       {
@@ -281,68 +272,66 @@ server <- function(input, output) {
   # Initial Analysis Run ------------------------------------------------
   
   dds_object <- reactiveVal(NULL)
-  validation_errors <- reactiveVal("")
-  
-  # Clear error messages: observing the key inputs related to user provided data
-  observeEvent(c(input$data,input$meta,input$formula),{
-    validation_errors("")
-  })
   
   # TODO: LOW- switch from console based progress to UI based progress
   # observeEvent causes this to crash when errored out
-  # I think I need to encolse the entire function in a tryCatch
+  # I think I need to enclose the entire function in a tryCatch
+  #
+  # Can probably use showNotification for a success banner as well
   
-  # TODO: LOW- have a general tryCatch around the different DESeq functions
-  # capture error messages and display to user in APP without crashing the 
   
-  # Reads in the data, validates, and runs the initial DESeq Analysis:
-  # observing input$run_dds
   
-  # do I need to save the metadata as reactiveVals as well???
-  # I think so if I want to use the gene.names outside of this function
+  # TODO: HIGH- clairfy app environment and if the variables within this observeEvent persist
+  # My intuition is that they do not like any other R function observeEvent creates
+  # an environment on run. So we need reactiveVals for meta and gene for future use
   
   observeEvent(input$run_dds, {
     
-    cat(file=stderr(),"Starting analysis...\n")
+    cat("Starting analysis...\n")
     
-    tryCatch({
-      counts <- rawData()
-      meta <- metaData()
-      if(length(input$formula)>0){f_usr <- input$formula}
-      
-      req(counts,meta,f_usr)
-      
-      cat(file=stderr(),"Data read in...\n")
-      
-      # pre-validation specific to formula inputs
-      f<-gsub(" ","",f_usr)
-      if(grepl("~",f)){f<-str_extract(f,"(?<=~).*")} 
-      # if the usr made a formula with a twiddle, just take everything after the twiddle
-      
-      f_fac<-unlist(str_split(f,"[+,*,:,|,-]"))
-      # these are the pieces we need to match against the meta colnames()
-      f_fac<-f_fac[f_fac!=1] 
-      #-1 is a common indicator to exclude the intercept in formulas which we don't need to check against the metadata
-      
-      # validation
-      validate(
-        need(ncol(counts) >= 2 && 
-               colnames(counts)[1]=="gene.id" && 
-               colnames(counts)[2]=="gene.name",
-             "The first two columns must be vectors of characters named gene.id and gene.name respectively"),
-        need(length(colnames(counts[,-c(1,2)])) > 0 &&
-               length(meta[,1]) > 0 &&
-               all(sort(colnames(counts[,-c(1,2)])) == sort(as.character(meta[,1]))),
-             "Sample names in count data columns and 
-             metadata do not match exactly when sorted. Please check for discrepancies."),
-        if(f!="~."){need(all(f_fac %in% colnames(meta)),
-                         "the pieces of your formula need to exactly match the column names of the metadata provided")}
-      )
-      },error = function(e){
-        cat(file=stderr(), "Error caught in analysis: ", e$message, "\n")
-        validation_errors(e$message)
-        NULL
-    })
+    counts <- rawData()
+    meta <- metaData()
+    if(length(input$formula)>0){f_usr <- input$formula}
+    
+    req(counts,meta,f_usr) # silently errors: could add notifications to rawData() or metData()
+    
+    cat("Data read in...\n")
+    
+    # pre-validation specific to formula inputs
+    f<-gsub(" ","",f_usr)
+    if(grepl("~",f)){f<-str_extract(f,"(?<=~).*")} 
+    # if the user made a formula with a twiddle, just take everything after the twiddle
+    
+    f_fac<-unlist(str_split(f,"[+,*,:,|,-]"))
+    # these are the pieces we need to match against the meta colnames()
+    f_fac<-f_fac[f_fac!=1] 
+    #-1 is a common indicator to exclude the intercept in formulas which we don't need to check against the metadata
+    
+    if(!(ncol(counts) >= 2 && colnames(counts)[1]=="gene.id" && 
+         colnames(counts)[2]=="gene.name")){
+      showNotification("Error: The first two columns must be vectors of characters named gene.id and gene.name respectively",
+                       type = "error",
+                       duration = NULL)
+      shiny:::reactiveStop()
+    }
+    
+    if(!(length(colnames(counts[,-c(1,2)])) > 0 && length(meta[,1]) > 0 && 
+       all(sort(colnames(counts[,-c(1,2)])) == sort(as.character(meta[,1]))))){
+    showNotification("Error: Sample names in count data columns and 
+           metadata do not match exactly when sorted. Please check for discrepancies.",
+                     type = "error",
+                     duration = NULL)
+    shiny:::reactiveStop()
+    }
+    
+    if(f!="~."){
+      if(!all(f_fac %in% colnames(meta))){
+        showNotification("Error: The pieces of your formula need to exactly match the column names of the metadata provided",
+                         type = "error",
+                         duration = NULL)
+        shiny:::reactiveStop()
+      }
+    }
     
     cat("Passed Validation!\n")
     
@@ -357,6 +346,11 @@ server <- function(input, output) {
     # <factor>     | <factor>   | ... | <factor>
     
     # f <- valid pieces to a formula
+    
+    
+    # below I would like to enclose the analysis in a withProgress
+    # I believe I can avoid a tryCatch statement because the above validation
+    # should ensure that the following should run
     
     genes<-cbind(counts[,1],counts[,2])
     
@@ -378,7 +372,7 @@ server <- function(input, output) {
       relevel_names<-input$col_relevel
       
       for(i in relevel_names){
-        meta[[i]]<-relevel(meta[[i]],ref=input[[paste0("relevel_",i)]]) #should work if input can be indexed like a dataframe
+        meta[[i]]<-relevel(meta[[i]],ref=input[[paste0("relevel_",i)]])
       }
       
       cat("The user requested releveling of the following columns: ", relevel_names,"\n")
@@ -387,7 +381,7 @@ server <- function(input, output) {
         }
     }
     
-
+    
     dds <- DESeqDataSetFromMatrix(countData=counts, colData=meta, design=f)
     
     cat(file=stderr(),"Made our matrix...\n")
@@ -409,22 +403,9 @@ server <- function(input, output) {
     #return(dds)
   }) # end analysisOutput
   
-  # Output to generate scary UI error message
-  output$analysis_error_message <- renderUI({
-    message_text <- validation_errors()
-    if (nzchar(message_text)) {
-      div(class = "alert alert-danger", HTML(message_text))
-    } else{NULL}
-  })
   
 
-  # TODO: LOW make sure this is implemented corectly, quickly adapted this to the 
-  # new observeEvent format. OR consider implementing a clear analysis button
-  #
-  # # the easiest way to test this is move on and make functionality, have another
-  # # dataset and then test if I change inputs if the functionality stops because the
-  # # it thinks the analysis is about to be updated. This could just end up being an
-  # # annoying feature
+  # TODO: VERY LOW- consider the benefits of clearing analyses when changing data
   # 
   # # Clear analysis output if file changes after an analysis was run: observing key changed inputs to indicate a new analysis is being run
   # observeEvent(c(input$data,input$meta,input$formula), {
@@ -449,7 +430,7 @@ server <- function(input, output) {
   
   
   
-  # Load Previous Model ----
+  # Load Previous Model (ISSUE: UNCOMPATIBLE WITH DOWNSTREAM ANALYSIS) ----
   # Looks for trigger from "load_prev_model"
   # requires a model has been uploaded, readRDS(), validate then
   # store in dds_object(dds), to overwrite any analysis currently being stored
@@ -492,10 +473,8 @@ server <- function(input, output) {
   
   # Post Analysis Functionality ----
   
-  # we now have a working application to run a basic analysis,
-  
-  # TODO: AFTER BASIC FUNCTIONALITY TODOS add in tab to load in a previous analysis, circumventing the main page
-  # will also be useful for testing to just load up an .rds
+  # Expects to have a DESeq Dataset object to call results on
+  # as well as the metadata associated with the DESeq Object
   
   # All other features actually using the post-processing data here
   
