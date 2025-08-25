@@ -2,6 +2,8 @@ library(shiny)
 library(bslib)
 library(DESeq2)
 library(stringr)
+library(ggplot2)
+library(ggrepel)
 
 # TODO: think about how to install these packages for the user, or make that part
 # of the markdown tutorial that will go along with this app
@@ -94,17 +96,19 @@ ui <- page_fluid(
               ),
     
     # Overview of the data ----
-    # accordion panels with a few different tools collapsed inside them
-    nav_panel("Basics", 
-              layout_columns(
-                card(
-                  card_header("PCA"),
-                  plotOutput("output$PCA")
-                  ),
-                card(
-                  card_header("Volcano Plots")
-                  )
-              )
+    # accordion panels with a few different tools collapsed inside them would
+    # be a better set up to not be overwhelming
+    nav_panel("Basics",
+              accordion(
+                accordion_panel(
+                  "PCA",
+                  plotOutput("PCA")
+                ),
+                accordion_panel(
+                  "Volcano Plot",
+                  plotOutput("Volcano")
+                )
+                )
               ), 
     
     # Ontology ----
@@ -273,15 +277,15 @@ server <- function(input, output) {
   
   # variables we need to hang on to for exploratory analysis
   dds_object <- reactiveVal(NULL)
-  meta <- reactiveVal(NULL)
-  genes <- reactiveVal(NULL)
+  meta_out <- reactiveVal(NULL)
+  genes_out <- reactiveVal(NULL)
   
   observeEvent(input$run_dds, {
     
     cat("Starting analysis...\n")
     
     counts <- rawData()
-    meta <- metaData()
+    meta<-metaData()
     if(length(input$formula)>0){f_usr <- input$formula}
     
     req(counts,meta,f_usr) # silently errors: could add notifications to rawData() or metData()
@@ -343,7 +347,7 @@ server <- function(input, output) {
     # I believe I can avoid a tryCatch statement because the above validation
     # should ensure that the following should run
     
-    genes<-cbind(counts[,1],counts[,2])
+    genes_out(cbind(counts[,1],counts[,2]))
     
     row.names(counts)<-counts[,1]
     
@@ -351,6 +355,7 @@ server <- function(input, output) {
     
     row.names(meta)<-meta[,1]
     meta<-meta[,-1,drop=FALSE]
+    meta_out(meta)
     
     f<-paste0("~",f)
     f<-formula(f)
@@ -420,9 +425,10 @@ server <- function(input, output) {
 
   # DESeq Dataset download handler -----
 
-  # The best way to solve the future issue, is to maybe have the app export the
+  # TO DO: LOW =The best way to solve the future issue, is to maybe have the app export the
   # entire R environment, then when you reload it it just resets the app to a
   # saved state
+  
   # Output processed into an .rds to be passed to the download handler
   output$export_dds <- downloadHandler(
     filename = function() {
@@ -439,7 +445,7 @@ server <- function(input, output) {
   
   
   
-  # Load Previous Model (ISSUE: UNCOMPATIBLE WITH DOWNSTREAM ANALYSIS) ----
+  # Load Previous Model (ISSUE: UNCOMPATIBLE WITH DOWNSTREAM ANALYSIS- see DESeq Dataset download handler todo) ----
   # Looks for trigger from "load_prev_model"
   # requires a model has been uploaded, readRDS(), validate then
   # store in dds_object(dds), to overwrite any analysis currently being stored
@@ -496,30 +502,28 @@ server <- function(input, output) {
   output$PCA <- renderPlot({
     req(dds_object())
     
-    test<-input$load_prev_model
-    
     dds<-dds_object()
     
-    cat(file = stderr(),"PCA in progress")
+    cat(file = stderr(),"PCA triggered...\n")
     
     # for PCAs we need normalized counts and not LFC
     rld_all <- rlog(dds, blind = FALSE)
     rld_all_df <- as.data.frame(assay(rld_all))
     
-    # TODO: figure out how to make the PCA customizable,
-    # probably need a big tryCatch around the whole plot generation
+    cat(file = stderr(),"PCA needed calculation done...\n")
+    
+    
+    # TODO: NEXT- figure out how to make the PCA customizable
     
     PCA_plot_all <- plotPCA(rld_all, intgroup = "treatment", returnData=TRUE,ntop=1000)
     percentVar <- round(100 * attr(PCA_plot_all, "percentVar"))
     
-    PCA_plot_all$name<-meta_pre_prep$group
-    PCA_plot_all$drug<-meta_pre_prep$drug
     PCA_plot_all$treatment<-sub("\\."," ",PCA_plot_all$treatment)
     
     # need to make a dropdown that allows the user to specify intgroup (groups of interest e.g. one of the columns),color, and label
     # as well as a color palette for the PCA
     
-    PCA_group <- ggplot(PCA_plot_all, aes(x=PC1, y=PC2, color=treatment, label=name)) +
+    PCA_group <- ggplot(PCA_plot_all, aes(x=PC1, y=PC2, color=treatment,label=treatment)) +
       geom_point(size=5) +
       scale_x_continuous(name=paste0("PC1: ",percentVar[1],"% variance"), limits=c(-20,20))+
       scale_y_continuous(name=paste0("PC2: ",percentVar[2],"% variance"), limits=c(-20,20))+
