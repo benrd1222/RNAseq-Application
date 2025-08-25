@@ -3,6 +3,9 @@ library(bslib)
 library(DESeq2)
 library(stringr)
 
+# TODO: think about how to install these packages for the user, or make that part
+# of the markdown tutorial that will go along with this app
+
 # This needs to be carefully considered if you want to host this app online,
 # but for local use it is dependent on your computers available memory
 options(shiny.maxRequestSize = 4000 * 1024^2) #set to 4 gigabytes
@@ -93,24 +96,21 @@ ui <- page_fluid(
                 card_header("Analysis Export"),
                 downloadButton("export_dds", 
                              "Download DESeq Datastructure")
-              ),
-              card(
-                card_header("Testing"),
-                actionButton("run_test",
-                             "Test"),
-                textOutput("testOutput")
               )
               ),
     
     # Overview of the data ----
     # accordion panels with a few different tools collapsed inside them
     nav_panel("Basics", 
-              "Here we allow the user to choose their reference condition, and
-              explore the various contrasts available as well as export data. Given
-              a reference level and the listed contrasts of interest we can also 
-              generate boxplots of the LFC for a list of up to 5 genes of interest.
-              We would also like to make an option for them to look at the boxplots
-              for the raw counts per million."
+              layout_columns(
+                card(
+                  card_header("PCA"),
+                  plotOutput("output$PCA")
+                  ),
+                card(
+                  card_header("Volcano Plots")
+                  )
+              )
               ), 
     
     # Ontology ----
@@ -163,68 +163,6 @@ ui <- page_fluid(
 
 # Server ----
 server <- function(input, output) {
-  
-  # Testing Output -----------------------------------------------------
-  
-  test_output_data <- eventReactive(input$run_test, {
-    cat(file=stderr(),"Triggering test evaluation...\n")
-    
-    tryCatch({
-      counts <- rawData()
-      meta <- metaData()
-      if(length(input$formula)>0){f_usr <- input$formula}
-      
-      req(counts,meta,f_usr)
-      
-      #need to include how to deal with -1 and ~.
-      
-      f<-gsub(" ","",f_usr)
-      if(grepl("~",f)){f<-str_extract(f,"(?<=~).*")} 
-      # if the usr made a formula with a twiddle, just take everything after the twiddle
-      
-      f_fac<-unlist(str_split(f,"[+,*,:,|,-]"))
-      # these are the pieces we need to match against the meta colnames()
-      f_fac<-f_fac[f_fac!=1] 
-      #-1 is a common indicator to exclude the intercept in formulas which we don't need to check against the metadata
-      
-      
-      validate(
-        need(ncol(counts) >= 2 && 
-               colnames(counts)[1]=="gene.id" && 
-               colnames(counts)[2]=="gene.name",
-             "The first two columns must be vectors of characters named gene.id and gene.name respectively"),
-        need(length(colnames(counts[,-c(1,2)])) > 0 &&
-               length(meta[,1]) > 0 &&
-               all(sort(colnames(counts[,-c(1,2)])) == sort(as.character(meta[,1]))),
-             "Sample names in count data columns and 
-             metadata do not match exactly when sorted. Please check for discrepancies."),
-        if(f!="~."){need(all(f_fac %in% colnames(meta)),
-                         "the pieces of your formula need to exactly match the columnnames of the metadata provided")}
-      )},error = function(e){
-        cat(file=stderr(), "Error caught in analysis: ", e$message, "\n")
-        validation_errors(e$message) # Store the error message in the reactiveVal
-        NULL # Return NULL for the reactive context (or stop for observers)
-      })
-    
-    cat("Passed Validation!\n")
-    
-    row.names(counts)<-counts[,1]
-    
-    counts<-counts[,-c(1,2)]
-    
-    row.names(meta)<-meta[,1]
-    meta<-meta[,-1,drop=FALSE]
-    
-    f<-paste0("~",f)
-    f<-formula(f)
-    
-    list(head(counts),head(meta),f)
-  })
-  
-  output$testOutput <- renderPrint({
-    test_output_data() # Call the eventReactive to get its value
-  })
-  
   
   # Conditional Switch inputs ----
   
@@ -359,6 +297,10 @@ server <- function(input, output) {
   
   # Reads in the data, validates, and runs the initial DESeq Analysis:
   # observing input$run_dds
+  
+  # do I need to save the metadata as reactiveVals as well???
+  # I think so if I want to use the gene.names outside of this function
+  
   observeEvent(input$run_dds, {
     
     cat(file=stderr(),"Starting analysis...\n")
@@ -507,11 +449,22 @@ server <- function(input, output) {
   
   
   
-  
   # Load Previous Model ----
   # Looks for trigger from "load_prev_model"
   # requires a model has been uploaded, readRDS(), validate then
   # store in dds_object(dds), to overwrite any analysis currently being stored
+  
+  # I didn't think of this but can we even load a previous model,
+  # a lot of this is contingent on having the other pieces of the data available
+  # to snag from, but the dds should be built of the same pieces
+  # actually we can rebuild out of dds@colData, every factor vector in this dataframe
+  # is one of the covariates and dds@design delivers us the formula
+  # the only thing missing would be the gene names associated with the metadata
+  # which we could map using some BioConductor function
+  
+  # or is it just easier to require them to reupload the metadata
+  
+  # No idea if this will work for all downstream applications
   
   observeEvent(input$load_prev_model,{
     req(input$prev_model)
@@ -531,9 +484,9 @@ server <- function(input, output) {
     
     dds_object(tmp)
       
-    cat("Analysis uploaded successfully with results loaded in as ", 
-        resultsNames(dds_object(),
-        "\n If this looks incorrect please validate the model was downloaded correctly\n"))
+    cat("Analysis uploaded successfully with results loaded in as\n", 
+        resultsNames(dds_object()),
+        "\nIf this looks incorrect please validate the model was downloaded correctly\n")
       
   })
   
@@ -548,6 +501,76 @@ server <- function(input, output) {
   
   # PCA and initial volcano plots.
   # This working properly depends on setting the reference level set properly
+  
+  # PCA is easy just run the rda_all with a switch that toggle the BLIND parameter
+
+  
+  output$PCA <- renderPlot({
+    req(dds_object())
+    
+    test<-input$load_prev_model
+    
+    dds<-dds_object()
+    
+    cat(file = stderr(),"PCA in progress")
+    
+    # for PCAs we need normalized counts and not LFC
+    rld_all <- rlog(dds, blind = FALSE)
+    rld_all_df <- as.data.frame(assay(rld_all))
+    
+    # TODO: figure out how to make the PCA customizable,
+    # probably need a big tryCatch around the whole plot generation
+    
+    PCA_plot_all <- plotPCA(rld_all, intgroup = "treatment", returnData=TRUE,ntop=1000)
+    percentVar <- round(100 * attr(PCA_plot_all, "percentVar"))
+    
+    PCA_plot_all$name<-meta_pre_prep$group
+    PCA_plot_all$drug<-meta_pre_prep$drug
+    PCA_plot_all$treatment<-sub("\\."," ",PCA_plot_all$treatment)
+    
+    # need to make a dropdown that allows the user to specify intgroup (groups of interest e.g. one of the columns),color, and label
+    # as well as a color palette for the PCA
+    
+    PCA_group <- ggplot(PCA_plot_all, aes(x=PC1, y=PC2, color=treatment, label=name)) +
+      geom_point(size=5) +
+      scale_x_continuous(name=paste0("PC1: ",percentVar[1],"% variance"), limits=c(-20,20))+
+      scale_y_continuous(name=paste0("PC2: ",percentVar[2],"% variance"), limits=c(-20,20))+
+      coord_fixed()+
+      ggforce::geom_mark_ellipse(aes(label=NULL,color = treatment))+
+      geom_text_repel(size=7,vjust = "inward", hjust = "inward",
+                      show.legend = FALSE, point.padding=10)+
+      ggtitle ("PCA")+
+      theme(plot.title = element_text(hjust = 0.5))+
+      theme(axis.text=element_text(size=20), 
+            axis.title=element_text(size=25), 
+            title=element_text(size=25,face="bold"), 
+            legend.text=element_text(size=20))
+    PCA_group
+  })
+  
+  # some option to save the PCA
+  
+  
+  
+  # Volcano plots are a little harder, depending on the formula there could be
+  # multiple different ways that the results could be stored or displayed in a DESeqDataSet object
+  
+  # - the simplest is one intercept with the treatment listed with the different comparison to the reference level
+  # - a more detailed GLM formula where displaying the differences becomes a matter of, picking the
+  # the relevant covariate and the contrasts within
+  # - These options are made more complicated by the different calls you can make
+  # to DESeq to display the results # TODO: investigate the vignette to determine options
+  # the two options are name and contrast
+  # 
+  # One exception to the equivalence of these two commands (name and contrast), is that, using contrast 
+  # will additionally set to 0 the estimated LFC in a comparison of two groups, where 
+  # all of the counts in the two groups are equal to 0 (while other groups have positive counts). 
+  # As this may be a desired feature to have the LFC in these cases set to 0, one 
+  # can use contrast to build these results tables. More information about extracting 
+  # specific coefficients from a fitted DESeqDataSet object can be found in the help page 
+  
+  
+  
   
   
 }
