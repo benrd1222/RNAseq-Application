@@ -4,6 +4,7 @@ library(DESeq2)
 library(stringr)
 library(ggplot2)
 library(ggrepel)
+library(RColorBrewer)
 
 # TODO: think about how to install these packages for the user, or make that part
 # of the markdown tutorial that will go along with this app
@@ -84,7 +85,7 @@ ui <- page_fluid(
                   
                   actionButton("run_dds", 
                                "Run Analysis"),
-                  uiOutput("analysis_error_message")
+                  uiOutput("analysis_error_message") #obsolete- check then remove
                 )
               ),
               
@@ -102,7 +103,20 @@ ui <- page_fluid(
               accordion(
                 accordion_panel(
                   "PCA",
-                  plotOutput("PCA")
+                  sidebarLayout(
+                    sidebarPanel(
+                      "Aesthetics",
+                      uiOutput("RenderPCAInputs"),
+                      sliderInput("Ntop", 
+                                  "Choice of top n genes to use for PCA:", 
+                                  min = 200, max = 1500, value = 500)
+                    ),
+                    mainPanel(
+                      plotOutput("PCA"),
+                      downloadButton("PCADownload",
+                                     "Download your PCA")
+                    )
+                    ),
                 ),
                 accordion_panel(
                   "Volcano Plot",
@@ -499,36 +513,94 @@ server <- function(input, output) {
   # PCA is easy just run the rda_all with a switch that toggle the BLIND parameter
 
   
-  output$PCA <- renderPlot({
+  # TODO: HIGH- the rldall call needs to be outside of the renderPlot it should
+  # only calculate when dds_object changes, which also means it needs to become a reactiveVal
+  
+  rld_out<-reactiveVal(NULL)
+  
+  # Look for analysis completion, run PCA calculation,
+  # keeping this compartmentalized helps for future uploading of other analyses
+  observeEvent(dds_object(),{
     req(dds_object())
     
     dds<-dds_object()
     
-    cat(file = stderr(),"PCA triggered...\n")
+    cat(file = stderr(),"PCA calculation triggered...\n")
     
     # for PCAs we need normalized counts and not LFC
     rld_all <- rlog(dds, blind = FALSE)
-    rld_all_df <- as.data.frame(assay(rld_all))
     
     cat(file = stderr(),"PCA needed calculation done...\n")
+    
+    rld_out(rld_all)
+  })
+  
+  output$RenderPCAInputs<-renderUI({
+    vars<-colnames(meta_out())
+    palettes<-rownames(brewer.pal.info)
+    
+    tagList(
+      selectInput("ColorPalette",
+                  "Choose Color Palette",
+                  choices = palettes,
+                  multiple = FALSE,
+                  selected = palettes[1]
+      ),
+      selectInput(
+        "IntGroup",
+        "Select group of interest for PCA:",
+        choices = vars,
+        multiple = FALSE,
+        selected = vars[1]
+      ),
+      selectInput(
+        "PCALabelVar",
+        "Select group to label by for PCA:",
+        choices = vars,
+        multiple = FALSE,
+        selected = vars[1]
+      )
+    )
+    
+  })
+  
+  output$PCA <- renderPlot({
+    req(rld_out(),meta_out())
+    
+    rld_all<-rld_out()
+    meta<-meta_out()
+    
+    cat(file = stderr(),"PCA triggered...\n")
     
     
     # TODO: NEXT- figure out how to make the PCA customizable
     
-    PCA_plot_all <- plotPCA(rld_all, intgroup = "treatment", returnData=TRUE,ntop=1000)
+    cat(paste0(input$IntGroup," is of type ",class(input$IntGroup),"\n"))
+    cat(paste0("Our group of interest has",length(unique(meta[[input$IntGroup]]))," unique factors\n"))
+    
+    PCA_plot_all <- plotPCA(rld_all, intgroup = input$IntGroup, returnData=TRUE,ntop=input$Ntop) #input$intgroup, input$ntop
     percentVar <- round(100 * attr(PCA_plot_all, "percentVar"))
     
-    PCA_plot_all$treatment<-sub("\\."," ",PCA_plot_all$treatment)
+    for(i in names(meta)){
+      PCA_plot_all[[i]]<-meta[[i]]
+    }
     
-    # need to make a dropdown that allows the user to specify intgroup (groups of interest e.g. one of the columns),color, and label
-    # as well as a color palette for the PCA
+    colors<-brewer.pal(length(unique(meta[[input$IntGroup]])),input$ColorPalette)
     
-    PCA_group <- ggplot(PCA_plot_all, aes(x=PC1, y=PC2, color=treatment,label=treatment)) +
+    
+    
+    # could take input$colorVar and choose a number of colors equidistant along 
+    # the palette of choice and then manual fill. Mainly I need to play around with this
+    # in a non app envronment
+    
+    
+    PCA_group <- ggplot(PCA_plot_all, aes_string(x="PC1", y="PC2",color=input$IntGroup,label=input$PCALabelVar)) + #input$PCAColorVar, input$PCALabelVar
       geom_point(size=5) +
+      scale_color_manual(values=colors)+
       scale_x_continuous(name=paste0("PC1: ",percentVar[1],"% variance"), limits=c(-20,20))+
       scale_y_continuous(name=paste0("PC2: ",percentVar[2],"% variance"), limits=c(-20,20))+
       coord_fixed()+
-      ggforce::geom_mark_ellipse(aes(label=NULL,color = treatment))+
+      ggforce::geom_mark_ellipse(aes_string(label="NULL",color = input$IntGroup))+
       geom_text_repel(size=7,vjust = "inward", hjust = "inward",
                       show.legend = FALSE, point.padding=10)+
       ggtitle ("PCA")+
@@ -540,7 +612,7 @@ server <- function(input, output) {
     PCA_group
   })
   
-  # some option to save the PCA
+  # input$save: ggsave
   
   
   
